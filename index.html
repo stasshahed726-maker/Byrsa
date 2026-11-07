@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Code Chat</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--text:#e6e8ee;--muted:#8b93a5;--accent:#6aa3ff;--user:#1f2a44;--code:#0a0c10}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 system-ui,sans-serif;height:100dvh;display:flex;flex-direction:column}
+header{padding:10px 16px;border-bottom:1px solid #232733;display:flex;gap:10px;align-items:center}
+header h1{font-size:16px;margin:0;flex:1}
+select,button{background:var(--panel);color:var(--text);border:1px solid #2a2f3d;border-radius:8px;padding:6px 10px;font:inherit;font-size:14px}
+button{cursor:pointer}
+#chat{flex:1;overflow:auto;padding:16px;max-width:820px;width:100%;margin:0 auto}
+.msg{margin:0 0 14px;padding:10px 14px;border-radius:12px;white-space:pre-wrap;word-wrap:break-word}
+.user{background:var(--user);margin-left:15%}
+.bot{background:var(--panel);margin-right:5%}
+pre{background:var(--code);border-radius:8px;padding:10px;overflow:auto;position:relative;margin:8px 0;white-space:pre}
+pre code{font:13px/1.45 ui-monospace,Menlo,Consolas,monospace}
+.copy{position:absolute;top:6px;right:6px;font-size:12px;padding:2px 8px}
+form{display:flex;gap:8px;padding:12px 16px;max-width:820px;width:100%;margin:0 auto}
+textarea{flex:1;resize:none;background:var(--panel);color:var(--text);border:1px solid #2a2f3d;border-radius:10px;padding:10px;font:inherit;max-height:160px}
+#send{background:var(--accent);color:#0b1020;border:0;font-weight:600;padding:0 18px}
+.hint{color:var(--muted);text-align:center;padding:30px}
+</style>
+</head>
+<body>
+<header>
+  <h1>💻 Code Chat</h1>
+  <select id="model">
+    <option value="qwen/qwen3-coder:free">Qwen3 Coder (free)</option>
+    <option value="deepseek/deepseek-chat-v3.1:free">DeepSeek V3.1 (free)</option>
+    <option value="openai/gpt-oss-120b:free">GPT-OSS 120B (free)</option>
+  </select>
+  <button id="clear">Очистить</button>
+</header>
+<div id="chat"><div class="hint">Задай вопрос по коду. Enter — отправить, Shift+Enter — новая строка.</div></div>
+<form id="form">
+  <textarea id="input" rows="1" placeholder="Напиши сообщение..."></textarea>
+  <button id="send">▶</button>
+</form>
+<script>
+const chat=document.getElementById('chat'),input=document.getElementById('input'),
+form=document.getElementById('form'),modelSel=document.getElementById('model');
+let history=JSON.parse(localStorage.getItem('h')||'[]');
+
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function render(text){
+  const parts=text.split(/```/);
+  return parts.map((p,i)=>{
+    if(i%2===0) return esc(p);
+    const nl=p.indexOf('\n');
+    const code=nl>=0?p.slice(nl+1):p;
+    return '<pre><button type="button" class="copy">Копировать</button><code>'+esc(code)+'</code></pre>';
+  }).join('');
+}
+function add(role,text){
+  const d=document.createElement('div');
+  d.className='msg '+(role==='user'?'user':'bot');
+  d.innerHTML=render(text);
+  chat.appendChild(d);chat.scrollTop=chat.scrollHeight;return d;
+}
+function redraw(){
+  chat.innerHTML='';
+  if(!history.length) chat.innerHTML='<div class="hint">Задай вопрос по коду. Enter — отправить, Shift+Enter — новая строка.</div>';
+  history.forEach(m=>add(m.role,m.content));
+}
+chat.addEventListener('click',e=>{
+  if(e.target.classList.contains('copy')){
+    navigator.clipboard.writeText(e.target.nextElementSibling.textContent);
+    e.target.textContent='Скопировано';setTimeout(()=>e.target.textContent='Копировать',1200);
+  }
+});
+document.getElementById('clear').onclick=()=>{history=[];localStorage.removeItem('h');redraw()};
+input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();form.requestSubmit()}});
+input.addEventListener('input',()=>{input.style.height='auto';input.style.height=input.scrollHeight+'px'});
+
+form.addEventListener('submit',async e=>{
+  e.preventDefault();
+  const text=input.value.trim();if(!text)return;
+  input.value='';input.style.height='auto';
+  if(!history.length) chat.innerHTML='';
+  history.push({role:'user',content:text});add('user',text);
+  const bot=add('assistant','…');let full='';
+  try{
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:modelSel.value,messages:history,stream:true})});
+    if(!r.ok) throw new Error(await r.text());
+    const reader=r.body.getReader(),dec=new TextDecoder();let buf='';
+    while(true){
+      const {done,value}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n');buf=lines.pop();
+      for(const l of lines){
+        if(!l.startsWith('data: '))continue;
+        const d=l.slice(6).trim();if(d==='[DONE]')continue;
+        try{const t=JSON.parse(d).choices?.[0]?.delta?.content;
+          if(t){full+=t;bot.innerHTML=render(full);chat.scrollTop=chat.scrollHeight}}catch{}
+      }
+    }
+    history.push({role:'assistant',content:full||'(пустой ответ)'});
+    localStorage.setItem('h',JSON.stringify(history.slice(-40)));
+  }catch(err){
+    bot.textContent='Ошибка: '+err.message;history.pop();
+  }
+});
+redraw();
+</script>
+</body>
+</html>
